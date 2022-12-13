@@ -56,6 +56,12 @@ export interface Enumerable<T> extends EmitterSource<T> {
     average(selector?: (value: T) => number): number;
 
     /**
+     * Emits values in the underlying sequence to arrays of at most 'count' size.
+     * @param size The maximum number of values to emit to each array.
+     */
+    chunk(size: number): Enumerable<T[]>;
+
+    /**
      * Returns an enumerable that will emit the current underlying sequence followed by the
      * provided sequence.
      * @param {Enumerable<T>} values The sequence to append to the current instance.
@@ -101,6 +107,25 @@ export interface Enumerable<T> extends EmitterSource<T> {
      * @returns {Enumerable<T>}
      */
     distinctBy<K>(selector: (value: T) => K, comparer?: (a: K, b: K) => boolean): Enumerable<T>;
+
+    /**
+     * Returns the sequence value emitted at the specified index or throws an error if a value at
+     * the index was not emitted.
+     * @param index
+     */
+    elementAt(index: number): T;
+
+    /**
+     * Returns the sequence value emitted at the specified index or 'undefined' if a value at the index was
+     * not emitted.
+     * @param index Index
+     */
+    elementAtOrDefault(index: number): T | undefined;
+
+    /**
+     * Returns whether this instance would emit no values.
+     */
+    empty(): boolean;
 
     /**
      * Returns an enumerable that will emit all values from the underlying sequence except values
@@ -161,6 +186,40 @@ export interface Enumerable<T> extends EmitterSource<T> {
      * @returns {T}
      */
     lastOrDefault(predicate?: (value: T) => boolean): T | undefined;
+
+    /**
+     * Returns the smallest value emitted from the underlying sequence.
+     * @param selector An optional function that converts values to a comparable number.
+     */
+    min(selector?: (value: T) => number): number;
+
+    /**
+     * Returns the largest value emitted from the underlying sequence.
+     * @param selector An optional function that converts values of 'T' to a comparable number.
+     */
+    max(selector?: (value: T) => number): number;
+
+    /**
+     * Returns an enumerable that will emit the values in the underlying sequence in on order determined
+     * by the given comparer function.
+     * @param comparer A function that returns -1, 0, or 1 if the first value is less than, equal to, or
+     * greater than the second value.
+     */
+    order(comparer: (a: T, b: T) => number): Enumerable<T>;
+
+    /**
+     * Returns an enumerable that will emit the values in the underlying sequence in an order determined
+     * by comparing the selected keys using a comparison function.
+     * @param selector A function that determines the key of the value to sort upon.
+     */
+    orderBy<K>(selector: (value: T) => K): Enumerable<T>;
+
+    /**
+     * Returns an enumerable that will emit the values in the underlying sequence in an order determined
+     * by comparing the selected keys using a comparison function.
+     * @param selector A function that determines the key of the value to sort upon.
+     */
+    orderByDescending<K>(selector: (value: T) => K,): Enumerable<T>
 
     /**
      * Returns an enumerable that will emit values of the underlying sequence that have been
@@ -265,10 +324,10 @@ class EnumerableImpl<T> implements Enumerable<T> {
     }
 
     append(value: T): Enumerable<T> {
-        const capturedSource = this._source;
+        const my = this;
         return new EnumerableImpl({
             emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number {
-                let index = capturedSource.emit(observer, cancelToken);
+                let index = my.emit(observer, cancelToken);
                 if (!cancelToken.signaled){
                     observer(value, index);
                 }
@@ -286,6 +345,30 @@ class EnumerableImpl<T> implements Enumerable<T> {
             throw new Error("sequence contains no elements");
         }
         return sum / count;
+    }
+
+    chunk(size: number): Enumerable<T[]> {
+        if (size < 1){
+            throw new Error("Chunk 'size' must be greater than 0");
+        }
+        const my = this;
+        return new EnumerableImpl<T[]>({
+            emit(observer: EmitterSourceObserver<T[]>, cancelToken: CancelToken): number {
+                let index = 0;
+                let temp: T[]=[];
+                my.emit(value => {
+                    temp.push(value);
+                    if (temp.length === size){
+                        observer([...temp], index++);
+                        temp = [];
+                    }
+                }, cancelToken);
+                if (!cancelToken.signaled && temp.length > 0){
+                    observer(temp, index++);
+                }
+                return index;
+            }
+        });
     }
 
     concat(values: Enumerable<T>): Enumerable<T> {
@@ -348,6 +431,39 @@ class EnumerableImpl<T> implements Enumerable<T> {
         return this._source.emit(observer, cancelToken);
     }
 
+    elementAt(index: number): T {
+        const result = this.elementAtOrDefault(index);
+        if (!result){
+            throw new Error(`sequence does not contain a value at index '${index}'`);
+        }
+        return result;
+    }
+
+    elementAtOrDefault(index: number): T | undefined {
+        if (index < 0){
+            throw new Error("'index' must be >= 0");
+        }
+        let result: T | undefined = undefined;
+        const cancelToken = new CancelTokenSource();
+        this.emit((value, i) => {
+            if (i === index){
+                result = value;
+                cancelToken.cancel();
+            }
+        }, cancelToken);
+        return result;
+    }
+
+    empty(): boolean {
+        let result = true;
+        const cancelToken = new CancelTokenSource();
+        this.emit(_ => {
+            result = false;
+            cancelToken.cancel();
+        }, cancelToken);
+        return result;
+    }
+
     except<K>(other: Enumerable<T>, keySelector?: (value: T) => K): Enumerable<T> {
         const my = this;
         const resolvedKeySelector = keySelector ?? ((value: any) => <K>value);
@@ -359,7 +475,7 @@ class EnumerableImpl<T> implements Enumerable<T> {
                     if (keys.has(resolvedKeySelector(value)))
                         return;
                     observer(value, index++);
-                }, CancelTokenSource.NEVER);
+                }, cancelToken);
                 return index;
             }
         })
@@ -396,7 +512,7 @@ class EnumerableImpl<T> implements Enumerable<T> {
                     if (!keys.has(resolvedKeySelector(value)))
                         return;
                     observer(value, index++);
-                }, CancelTokenSource.NEVER);
+                }, cancelToken);
                 return index;
             }
         })
@@ -415,6 +531,26 @@ class EnumerableImpl<T> implements Enumerable<T> {
             const matched = predicate?.(value) ?? true;
             return { state: matched ? value : undefined };
         })
+    }
+
+    min(selector?: (value: T) => number): number {
+        return this.forwardCompare(Number.MAX_VALUE, Math.min, selector);
+    }
+
+    max(selector?: (value: T) => number): number {
+        return this.forwardCompare(Number.MIN_VALUE, Math.max, selector);
+    }
+
+    order(comparer: (a: T, b: T) => number): Enumerable<T> {
+        return this.orderByInternal(t => t, comparer);
+    }
+
+    orderBy<K>(selector: (value: T) => K): Enumerable<T> {
+        return this.orderByInternal(selector, (a, b) => a < b ? -1 : a === b ? 0 : 1);
+    }
+
+    orderByDescending<K>(selector: (value: T) => K): Enumerable<T> {
+        return this.orderByInternal(selector, (a, b) => a < b ? 1 : a === b ? 0 : -1);
     }
 
     skip(count: number): Enumerable<T> {
@@ -506,11 +642,12 @@ class EnumerableImpl<T> implements Enumerable<T> {
     }
 
     where(predicate: (value: T) => boolean): Enumerable<T> {
-        const capturedSource = this._source;
+        const my = this;
         return new EnumerableImpl({
             emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number {
                 let index = 0;
-                capturedSource.emit((value, _) => {
+                my.emit(value => {
+                    console.log(`Evaluate ${value}, result=${predicate(value)}`);
                     if (predicate(value)){
                         observer(value, index++);
                     }
@@ -518,6 +655,25 @@ class EnumerableImpl<T> implements Enumerable<T> {
                 return index;
             }
         })
+    }
+
+    private forwardCompare(
+        initial: number,
+        comparer: (a: number, b: number) => number,
+        selector?: (value: T) => number): number {
+
+        const resolvedSelector = selector ?? ((t: any) => Number(t));
+        let m = initial;
+        let emitted = false;
+        this.forEach(value => {
+            emitted = true;
+            const n = resolvedSelector(value);
+            m = comparer(m, n);
+        });
+        if (!emitted) {
+            throw new Error("sequence contains no elements")
+        }
+        return m;
     }
 
     private statefulForEach<STATE>(
@@ -534,6 +690,22 @@ class EnumerableImpl<T> implements Enumerable<T> {
             }
         }, cancelToken);
         return state;
+    }
+
+    private orderByInternal<K>(selector: (value: T) => K, comparer?: (a: K, b: K) => number): Enumerable<T> {
+        const my = this;
+        const resolvedComparer = comparer ?? ((a,b) => a < b ? -1 : a === b ? 0 : 1);
+        return new EnumerableImpl({
+            emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number {
+                let index = 0;
+                const arr: T[]=[];
+                my.emit(value => arr.push(value), cancelToken);
+                arr
+                    .sort((a,b) => resolvedComparer(selector(a), selector(b)))
+                    .forEach(value => observer(value, index++));
+                return index;
+            }
+        });
     }
 }
 
