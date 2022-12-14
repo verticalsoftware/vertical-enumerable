@@ -1,123 +1,93 @@
 import { CancelToken, CancelTokenSource } from "./cancel-token";
 
 /**
- * Defines a callback function for emitter sources
- * @param T The type of value being received
+ * Defines a function that observes values emitted by a source.
  */
 export type EmitterSourceObserver<T> = (value: T, index: number) => void;
 
 /**
- * Represents the interface of an object that emits values of some underlying sequence
- * to an observer function.
- * @param T The type of value being emitted
+ * Defines an object that emits values.
  */
-export interface EmitterSource<T> {
-    /**
-     * Emits each value in the underlying sequence until cancellation is requested. Returns
-     * the number of items emitted.
-     * @param {EmitterSourceObserver<T>} observer A function that receives each value and optionally
-     * the current index.
-     * @param {CancelToken} cancelToken A token that can be observed for cancellation requests.
-     */
-    emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number;
-}
+export abstract class EmitterSource<T> implements Iterable<T> {
 
-/**
- * Implements an EmitterSource<T> using an array as the underlying sequence.
- */
-export class ArrayEmitterSource<T> implements EmitterSource<T> {
     /**
-     * Constructs a new instance
-     * @param {T[]} source Source array
+     * Emits values of the underlying source to the observer while the cancel token remains
+     * unsignaled.
+     * @param observer Function that receives each value.
+     * @param cancelToken Token that can be observed for cancellation signals.
      */
-    constructor(source: T[]){
-        this._source = source;
+    abstract emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number;
+
+    /**
+     * Emits values of the underlying source to an array.
+     */
+    toArray(): T[] {
+        const array: T[]=[];
+        this.emit(value => array.push(value), CancelTokenSource.NEVER);
+        return array;
     }
 
-    private readonly _source: T[];
-
-    /**
-     * Emits each value in the underlying sequence until cancellation is requested.
-     * @param {EmitterSourceObserver<T>} observer A function that receives each value and optionally
-     * the current index.
-     * @param {CancelToken} cancelToken A token that can be observed for cancellation requests.
-     */
-    emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number {
-        let count = 0;
-        for (let c = 0; !cancelToken.signaled && c < this._source.length; c++){
-            observer(this._source[c], c);
-            count++;
+    *[Symbol.iterator](): IterableIterator<T> {
+        const array = this.toArray();
+        for(let c = 0; c < array.length; c++){
+            yield array[c];
         }
-        return count;
+    }
+
+    /**
+     * Creates an emitter source.
+     * @param source Array or Iterable<OUT> instance.
+     */
+    public static create<OUT>(source: OUT[] | Iterable<OUT>): EmitterSource<OUT> {
+        return Array.isArray(source)
+            ? new ArrayEmitterSource(source)
+            : new IterableEmitterSource(source);
     }
 }
 
 /**
- * Implements an EmitterSource<T> using values yielded from an iterator.
+ * Represents an EmitterSource<T> that uses an underlying array.
  */
-export class IterableIteratorEmitterSource<T> implements EmitterSource<T> {
+export class ArrayEmitterSource<T> extends EmitterSource<T> {
+
     /**
-     * Constructs a new instance
-     * @param {IterableIterator<T>} iterator Source iterator
+     * Creates a new instance.
+     * @param array The array that contains values to emit.
      */
-    constructor(iterator: IterableIterator<T>) {
-        this._source = iterator;
+    constructor(private readonly array: T[]) {
+        super();
     }
 
-    private readonly _source: IterableIterator<T>;
-
-    /**
-     * Emits each value in the underlying sequence until cancellation is requested.
-     * @param {EmitterSourceObserver<T>} observer A function that receives each value and optionally
-     * the current index.
-     * @param {CancelToken} cancelToken A token that can be observed for cancellation requests.
-     */
     emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number {
+        const array = this.array;
         let c = 0;
-        for (let value of this._source){
-            if (cancelToken.signaled)
-                break;
-            observer(value, c++);
+        for (; !cancelToken.signaled && c < array.length; c++){
+            observer(array[c], c);
         }
         return c;
     }
 }
 
 /**
- * Represents a controllable EmitterSource.
+ * Defines an emitter that uses an iterable as a source.
  */
-export class StateWrappingEmitterSource<IN, STATE, OUT> implements EmitterSource<OUT> {
-    constructor(
-        private readonly _source: EmitterSource<IN>,
-        private readonly _options: {
-            state: STATE;
-            reducer: (input: IN, state: STATE) => {
-                cancelWhen?: boolean,
-                emit: OUT | undefined,
-                state: STATE
-            }
+export class IterableEmitterSource<T> extends EmitterSource<T> {
+
+    /**
+     * Creates a new instance
+     * @param iterable An iterable source
+     */
+    constructor(private readonly iterable: Iterable<T>){
+        super();
+    }
+
+    emit(observer: EmitterSourceObserver<T>, cancelToken: CancelToken): number {
+        let index = 0;
+        for (let value of this.iterable){
+            if (cancelToken.signaled)
+                break;
+            observer(value, index++);
         }
-    )
-    {}
-
-    emit (observer: EmitterSourceObserver<OUT>, cancelToken: CancelToken): number {
-        let state = this._options.state;
-        let count = 0;
-        const reducer = this._options.reducer;
-        const linkedCancelSource = new CancelTokenSource(cancelToken);
-
-        this._source.emit(value => {
-            const reduced = reducer(value, state);
-            if (reduced.emit){
-                observer(reduced.emit, count);
-                count++;
-            }
-            if (reduced.cancelWhen){
-                linkedCancelSource.cancel();
-            }
-            state = reduced.state;
-        }, linkedCancelSource);
-
-        return count;
+        return index;
     }
 }

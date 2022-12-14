@@ -1,11 +1,6 @@
-import { asEnumerable } from "./enumerable";
+import { ArrayEmitterSource } from "./emitter";
 
-const items = [
-    "apples", "bananas", "cherries", "dates", "eggs", "figs", "grapes", "mango", "nuts"
-];
-
-const query = asEnumerable(items);
-
-console.log(typeof query);
-
-console.log(query.toArray());
+const e = new ArrayEmitterSource([1,2,3,4,5]);
+for(let v of e){
+    console.log(v);
+}
